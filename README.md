@@ -8,9 +8,6 @@ A modern **MERN-stack** app for managing shared expenses with:
 - **Explainable settlements**
 - Clean **dark UI** with light/dark toggle
 
-<div align="center">
-  <img src="./assets/hero-banner.png" alt="SettleFlow banner" width="800" />
-</div>
 
 ---
 
