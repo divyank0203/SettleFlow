@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { api } from "../api";
 
-export default function GroupView() {
+export default function Groupview() {
   const { id } = useParams();
   const [group, setGroup] = useState(null);
   const [members, setMembers] = useState([]);
