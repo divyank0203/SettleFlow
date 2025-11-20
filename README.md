@@ -1,141 +1,114 @@
-🚀 SettleFlow — Smart Group Expense & Settlement Manager
+# 💸 SettleFlow — Smart Group Expense & Settlement Manager
 
-A Modern MERN-stack app with intelligent parsing, settlement optimization, and clean UI.
+A modern **MERN-stack** app for managing shared expenses with:
 
-📌 Overview
+- **Text-based expense input** (paste “Rohit paid 600 for dinner…”)
+- **Smart parsing** into structured expenses
+- **Minimal-transaction settlement optimization**
+- **Explainable settlements**
+- Clean **dark UI** with light/dark toggle
 
-SettleFlow is a full-stack MERN application built to simplify group expense management.
-Whether it’s a trip, a flat, or a college event, SettleFlow helps users:
+<div align="center">
+  <img src="./assets/hero-banner.png" alt="SettleFlow banner" width="800" />
+</div>
 
-Track shared expenses
+---
 
-Auto-categorize spending
+## ✨ Features
 
-Parse natural-language descriptions into expenses
+### 🧠 1. Natural-Language Expense Parsing
 
-Compute minimal settlement transactions
+Instead of filling 4–5 fields per expense, users can paste text like:
 
-Get explainable, transparent reasoning behind each payment
+> “I paid 1200 for hotel, Rohit paid 600 for dinner, Aman paid 300 for snacks”
 
-View spending insights for the month
+SettleFlow’s **NLP-lite parser**:
 
-It focuses on speed, clarity, and automation rather than manual form-heavy workflows.
+- Extracts payer names  
+- Extracts amounts  
+- Infers descriptions  
+- Auto-splits across members  
+- Creates multiple expenses in one shot  
 
-✨ Key Features
-🔹 1. Smart Natural-Language Expense Parsing
+No external AI calls → **fast** and **privacy-friendly**.
 
-Paste text like:
+---
 
-“I paid 1200 for hotel, Rohit paid 600 for dinner, Aman paid 300 for snacks.”
+### 🔄 2. Minimal-Transaction Settlements
 
-SettleFlow extracts:
+SettleFlow computes **who owes whom** using a simple optimization:
 
-payer
+- Groups debtors and creditors
+- Matches largest debtors to largest creditors
+- Produces a **minimal set of transfers** instead of many small ones
 
-amount
+This makes settlements easy to execute in real life:
+fewer UPI/Paytm/GPay transactions, less confusion.
 
-description
+The app also generates a **plain-English explanation** of why each transfer is suggested.
 
-category
+---
 
-auto-split shares
+### 📊 3. Monthly Insights
 
-creates expenses instantly
+For each group, SettleFlow provides:
 
-This uses a lightweight hybrid parser (regex + rule-based NLP) — no cloud AI required.
+- Total spent this month  
+- Number of transactions  
+- Category-wise breakdown (food, travel, shopping, etc.)  
+- A short summary highlighting patterns (top categories, suggestions)
 
-🔹 2. Minimal-Transaction Settlement Engine
+---
 
-SettleFlow computes:
+### 👥 4. Group & Member Management
 
-Who owes whom
+- Create groups for **trips**, **flats**, **fests**, etc.  
+- Add members by email (registered users)  
+- Every expense is linked to a group and payer  
 
-How much
+---
 
-With the least number of transactions possible
+### 🎨 5. Fintech-Style Dark UI + Theme Toggle
 
-It uses debtor–creditor matching to reduce transfers by ~70%.
+- Dark-first design with **black × teal** fintech vibe  
+- Clean cards, layouts, and typography using **TailwindCSS**  
+- Light/dark theme toggle built with React state + Tailwind `dark` class  
+- Heroicons for modern, non-emoji icons
 
-🔹 3. Explainable Settlements (AI-like Reasoning)
+---
 
-Example:
+## 🧱 Tech Stack
 
-“Aman pays Rohit ₹350 because Aman is the highest debtor while Rohit is the highest creditor.
-Matching them reduces one transaction edge.”
+**Frontend**
 
-This is a differentiator from Splitwise & Tricount.
+- React (Vite)
+- React Router
+- Context API for auth
+- TailwindCSS
+- Heroicons
 
-🔹 4. Monthly Insights Dashboard
+**Backend**
 
-Shows total spending, category-wise breakdown, and summarized patterns for each group.
+- Node.js + Express
+- MongoDB + Mongoose
+- JWT-based authentication
+- Custom NLP-like parsing logic
+- Settlement optimization + explanation layer
 
-🔹 5. Clean Modern UI with Light/Dark Mode
+**Other**
 
-Built using:
+- RESTful API design
+- Environment-based configuration
+- Ready for deployment to Render/Railway (backend) + Vercel/Netlify (frontend)
 
-React
+---
 
-Tailwind CSS
+## 🏛 Architecture Overview
 
-Heroicons
+> Frontend ↔ Backend ↔ Database
 
-Responsive, minimal, product-like finish
-
-User-friendly toggles & interactive components
-
-🔹 6. Secure JWT Authentication
-
-Includes registration, login, logout, and protected routes.
-
-🔹 7. Group Member Management
-
-Add members by email, enabling shared expense tracking.
-
-🏗️ Tech Stack
-Frontend
-
-React (Vite)
-
-React Router
-
-TailwindCSS + Heroicons
-
-Context API for auth
-
-Light/Dark theme with persistent state
-
-Backend
-
-Node.js + Express
-
-JWT Authentication
-
-MongoDB + Mongoose
-
-Custom NLP parsing engine
-
-Settlement optimizer
-
-Insights generator
-
-Infrastructure
-
-.env configuration
-
-MongoDB Atlas compatible
-
-Ready for deployment on Render / Railway / Vercel
-
-🧠 Why This Project Is Unique
-
-Unlike typical expense-tracker clones:
-
-Uses rule-based NLP to parse expenses from plain English
-
-Provides human-like settlement explanations
-
-Has minimal-transaction optimization (algorithmic component)
-
-Features a polished modern interface
-
-Designed with financial clarity in mind (perfect for Visa)
+```text
+[ React + Tailwind ]  <--->  [ Node.js + Express APIs ]  <--->  [ MongoDB (Mongoose) ]
+          |                                |                              |
+   Auth Context / JWT                Auth middleware                 Groups / Expenses
+   Pages & Routes                    Routes & Controllers           Users / Stats
