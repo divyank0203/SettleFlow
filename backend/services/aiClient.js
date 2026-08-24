@@ -1,21 +1,13 @@
 import dotenv from "dotenv";
 dotenv.config();
 
-import OpenAI from "openai";
+import Groq from "groq-sdk";
 import { z } from "zod";
-import { zodTextFormat } from "openai/helpers/zod";
 
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+const groq = new Groq({
+  apiKey: process.env.GROQ_API_KEY,
 });
 
-/*
- * Allowed categories for SettleFlow.
- *
- * Keeping this controlled is important:
- * the model can suggest a category,
- * but it cannot invent arbitrary categories.
- */
 const EXPENSE_CATEGORIES = [
   "food",
   "travel",
@@ -27,149 +19,182 @@ const EXPENSE_CATEGORIES = [
   "other",
 ];
 
-/*
- * Structured schema returned by the model.
- *
- * The model MUST return this shape.
- */
-const ExpenseItem = z.object({
-  payerName: z
-    .string()
-    .describe("Name of the person who paid for this expense."),
-  amount: z
-    .number()
-    .positive()
-    .describe("Total amount paid for the expense."),
-  description: z
-    .string()
-    .min(1)
-    .describe("Short description of the expense."),
-  category: z
-    .enum(EXPENSE_CATEGORIES)
-    .describe("One of the allowed SettleFlow expense categories."),
+const ExpenseItemSchema = z.object({
+  payerName: z.string().min(1),
+  amount: z.number().positive(),
+  description: z.string().min(1),
+  category: z.enum(EXPENSE_CATEGORIES),
 });
 
-const ExpenseParseResponse = z.object({
-  expenses: z.array(ExpenseItem),
+const ParsedExpensesSchema = z.object({
+  expenses: z.array(ExpenseItemSchema),
 });
 
-function getClient() {
-  if (!process.env.OPENAI_API_KEY) {
-    throw new Error("OPENAI_API_KEY is missing");
+const expenseJsonSchema = {
+  type: "object",
+  properties: {
+    expenses: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          payerName: {
+            type: "string",
+            description:
+              "Name of the person who paid for the expense.",
+          },
+          amount: {
+            type: "number",
+            description: "Positive numeric expense amount.",
+          },
+          description: {
+            type: "string",
+            description: "Short description of the expense.",
+          },
+          category: {
+            type: "string",
+            enum: EXPENSE_CATEGORIES,
+            description: "Expense category.",
+          },
+        },
+        required: [
+          "payerName",
+          "amount",
+          "description",
+          "category",
+        ],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["expenses"],
+  additionalProperties: false,
+};
+
+function getGroqClient() {
+  if (!process.env.GROQ_API_KEY) {
+    throw new Error("GROQ_API_KEY is missing");
   }
 
-  return client;
+  return groq;
 }
 
 /**
- * Parse natural language into structured expenses.
- *
- * Example:
- *
- * "Yesterday I paid 1200 for the hotel and Rahul paid
- *  600 for dinner."
- *
- * -> structured expense objects
+ * Converts natural language into structured expenses.
  */
 export async function parseNaturalLanguageExpenses({
   text,
   members,
   currentUserName,
 }) {
-  if (!text || !text.trim()) {
+  if (!text?.trim()) {
     throw new Error("Expense text is required");
   }
 
-  if (!Array.isArray(members) || members.length === 0) {
+  if (!members || members.length === 0) {
     throw new Error("Group members are required");
   }
 
   const memberNames = members.map((member) => member.name);
 
   const systemPrompt = `
-You are the expense extraction engine for SettleFlow.
+You are the natural-language expense extraction engine for SettleFlow.
 
-Your job is to convert casual human expense descriptions into structured expense records.
+Convert the user's casual expense description into structured expense records.
 
-IMPORTANT RULES:
+RULES:
 
-1. Only identify people who exist in the supplied group member list.
-2. If the user says "I", interpret it as the current user's name.
+1. Only use payer names that exist in the provided group members.
+2. If the user says "I" or "me", use the current user's name.
 3. Never invent a payer.
-4. Extract every distinct expense you can identify.
+4. Extract every clearly identifiable expense.
 5. Amount must be a positive number.
-6. Description should be short and human-readable.
-7. Category MUST be one of:
-   food, travel, rent, utilities, shopping, entertainment, college, other
-8. If the category is ambiguous, use "other".
-9. Do not calculate individual splits. SettleFlow will do that separately.
-10. Do not add commentary outside the structured response.
-11. If a sentence does not clearly identify an expense, ignore it.
+6. Keep descriptions short and readable.
+7. Category MUST be exactly one of:
+   food
+   travel
+   rent
+   utilities
+   shopping
+   entertainment
+   college
+   other
+8. If category is unclear, use "other".
+9. Do not calculate individual splits.
+10. Ignore text that does not clearly describe an expense.
+11. Do not return explanations or extra text.
 
 Current user:
 ${currentUserName}
 
-Group members:
+Valid group members:
 ${memberNames.join(", ")}
 `;
 
-  const input = `
-Extract expenses from the following user input:
+  const response = await getGroqClient().chat.completions.create({
+    model: "openai/gpt-oss-20b",
 
-${text}
-`;
+    messages: [
+      {
+        role: "system",
+        content: systemPrompt,
+      },
+      {
+        role: "user",
+        content: text,
+      },
+    ],
 
-  const response = await getClient().responses.parse({
-    model: "gpt-5.6-luna",
-    instructions: systemPrompt,
-    input,
-    text: {
-      format: zodTextFormat(
-        ExpenseParseResponse,
-        "settleflow_expenses"
-      ),
+    temperature: 0,
+
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "settleflow_expenses",
+        strict: true,
+        schema: expenseJsonSchema,
+      },
     },
   });
 
-  if (response.status !== "completed") {
-    throw new Error(
-      `AI response incomplete: ${JSON.stringify(
-        response.incomplete_details || {}
-      )}`
-    );
+  const content =
+    response.choices?.[0]?.message?.content;
+
+  if (!content) {
+    throw new Error("Groq returned an empty response");
   }
 
-  const parsed = response.output_parsed;
+  let parsed;
 
-  if (!parsed) {
-    throw new Error("AI returned no structured expense data");
+  try {
+    parsed = JSON.parse(content);
+  } catch (error) {
+    console.error("Invalid Groq JSON:", content);
+    throw new Error("Groq returned invalid structured data");
   }
 
-  /*
-   * SECOND validation layer:
-   * Even though OpenAI structured output validates the schema,
-   * we still validate against YOUR application's business rules.
-   */
+  // Schema validation
+  const validated = ParsedExpensesSchema.parse(parsed);
 
-  const normalizedMembers = members.map((member) => ({
-    id: member._id.toString(),
-    name: member.name,
-  }));
-
+  // Application-level validation
   const validExpenses = [];
 
-  for (const expense of parsed.expenses) {
-    const matchedMember = normalizedMembers.find(
+  for (const expense of validated.expenses) {
+    const matchedMember = members.find(
       (member) =>
-        member.name.toLowerCase() ===
+        member.name.trim().toLowerCase() ===
         expense.payerName.trim().toLowerCase()
     );
 
+    // Never allow the model to invent a member.
     if (!matchedMember) {
       continue;
     }
 
-    if (!Number.isFinite(expense.amount) || expense.amount <= 0) {
+    if (
+      !Number.isFinite(expense.amount) ||
+      expense.amount <= 0
+    ) {
       continue;
     }
 
@@ -185,18 +210,99 @@ ${text}
 }
 
 /**
- * AI-generated settlement explanation.
- *
- * This is still structured through the same client,
- * but unlike the parser it only returns text.
+ * Categorize a manually entered expense.
  */
-export async function explainSettlements(transfers, usersMap) {
+export async function categorizeExpense(description) {
+  if (!description?.trim()) {
+    return "other";
+  }
+
+  const categorySchema = {
+    type: "object",
+    properties: {
+      category: {
+        type: "string",
+        enum: EXPENSE_CATEGORIES,
+      },
+    },
+    required: ["category"],
+    additionalProperties: false,
+  };
+
+  const response = await getGroqClient().chat.completions.create({
+    model: "openai/gpt-oss-20b",
+
+    messages: [
+      {
+        role: "system",
+        content: `
+Classify the expense into exactly one category:
+
+food
+travel
+rent
+utilities
+shopping
+entertainment
+college
+other
+
+Use "other" when uncertain.
+`,
+      },
+      {
+        role: "user",
+        content: description,
+      },
+    ],
+
+    temperature: 0,
+
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "expense_category",
+        strict: true,
+        schema: categorySchema,
+      },
+    },
+  });
+
+  const content =
+    response.choices?.[0]?.message?.content;
+
+  if (!content) {
+    return "other";
+  }
+
+  try {
+    const parsed = JSON.parse(content);
+
+    if (
+      EXPENSE_CATEGORIES.includes(parsed.category)
+    ) {
+      return parsed.category;
+    }
+
+    return "other";
+  } catch {
+    return "other";
+  }
+}
+
+/**
+ * Explain settlement transfers.
+ */
+export async function explainSettlements(
+  transfers,
+  usersMap
+) {
   if (!transfers || transfers.length === 0) {
     return "No settlements are required. Everyone is already balanced.";
   }
 
   const prompt = `
-Explain this SettleFlow settlement plan clearly and briefly.
+You are explaining a group expense settlement.
 
 Users:
 ${JSON.stringify(usersMap, null, 2)}
@@ -205,89 +311,80 @@ Transfers:
 ${JSON.stringify(transfers, null, 2)}
 
 Explain:
-1. who pays whom,
-2. why these transfers settle the balances,
-3. why the number of transfers is compact.
+1. Who pays whom.
+2. Why these transfers settle the balances.
+3. Why the number of transfers is compact.
 
-Use plain English.
-Do not invent any additional transactions.
+Use only the supplied information.
+Do not invent any transactions.
+Keep the response concise.
 `;
 
-  const response = await getClient().responses.create({
-    model: "gpt-5.6-luna",
-    instructions:
-      "You explain financial settlement results clearly. Never invent transactions.",
-    input: prompt,
-  });
+  const response =
+    await getGroqClient().chat.completions.create({
+      model: "openai/gpt-oss-20b",
 
-  return response.output_text.trim();
+      messages: [
+        {
+          role: "system",
+          content:
+            "You explain financial settlements accurately and concisely.",
+        },
+        {
+          role: "user",
+          content: prompt,
+        },
+      ],
+
+      temperature: 0.2,
+    });
+
+  return (
+    response.choices?.[0]?.message?.content?.trim() ||
+    "Unable to generate settlement explanation."
+  );
 }
 
 /**
- * AI monthly insight summary.
+ * Generate monthly spending insights.
  */
 export async function generateInsightsSummary(stats) {
   const prompt = `
-Analyze these SettleFlow expense statistics:
+Analyze these SettleFlow spending statistics:
 
 ${JSON.stringify(stats, null, 2)}
 
 Provide:
 - the highest spending category,
-- notable spending patterns,
-- 1-2 practical observations.
+- an important spending pattern,
+- one practical observation.
 
-Keep it concise and factual.
-Do not invent numbers.
+Use only the supplied numbers.
+Do not invent data.
+Keep the answer concise.
 `;
 
-  const response = await getClient().responses.create({
-    model: "gpt-5.6-luna",
-    instructions:
-      "You are a concise financial expense analysis assistant. Only use supplied data.",
-    input: prompt,
-  });
+  const response =
+    await getGroqClient().chat.completions.create({
+      model: "openai/gpt-oss-20b",
 
-  return response.output_text.trim();
-}
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a concise expense analysis assistant. Only use supplied data.",
+        },
+        {
+          role: "user",
+          content: prompt,
+        },
+      ],
 
-/**
- * Kept for compatibility with existing expense creation code.
- *
- * It now uses the same structured AI classification instead
- * of keyword matching.
- */
-export async function categorizeExpense(description) {
-  if (!description?.trim()) {
-    return "other";
-  }
+      temperature: 0.2,
+    });
 
-  const CategoryResponse = z.object({
-    category: z
-      .enum(EXPENSE_CATEGORIES)
-      .describe("Expense category."),
-  });
-
-  const response = await getClient().responses.parse({
-    model: "gpt-5.6-luna",
-    instructions: `
-Classify the expense into exactly one of:
-food, travel, rent, utilities, shopping, entertainment, college, other.
-
-Return "other" when uncertain.
-`,
-    input: description,
-    text: {
-      format: zodTextFormat(
-        CategoryResponse,
-        "expense_category"
-      ),
-    },
-  });
-
-  if (!response.output_parsed) {
-    return "other";
-  }
-
-  return response.output_parsed.category;
+  return (
+    response.choices?.[0]?.message?.content?.trim() ||
+    "Unable to generate insights."
+  );
 }

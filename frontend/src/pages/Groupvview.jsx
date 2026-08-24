@@ -4,50 +4,124 @@ import { api } from "../api";
 
 export default function Groupvview() {
   const { id } = useParams();
+
   const [group, setGroup] = useState(null);
   const [members, setMembers] = useState([]);
   const [expenses, setExpenses] = useState([]);
+
   const [payer, setPayer] = useState("");
   const [amount, setAmount] = useState("");
   const [description, setDescription] = useState("");
+
   const [settlements, setSettlements] = useState([]);
-  const [settleExplanation, setSettleExplanation] = useState("");
+  const [settleExplanation, setSettleExplanation] =
+    useState("");
+
   const [nlText, setNlText] = useState("");
   const [loadingAI, setLoadingAI] = useState(false);
-  const [newMemberEmail, setNewMemberEmail] = useState("");
+
+  const [newMemberEmail, setNewMemberEmail] =
+    useState("");
 
   useEffect(() => {
     async function load() {
       try {
         const groups = await api("/api/groups");
-        const g = groups.find((x) => x._id === id);
-        setGroup(g);
-        setMembers(g?.members || []);
-        const ex = await api(`/api/expenses/group/${id}`);
+
+        const currentGroup = groups.find(
+          (g) => g._id === id
+        );
+
+        if (!currentGroup) {
+          throw new Error("Group not found");
+        }
+
+        setGroup(currentGroup);
+        setMembers(currentGroup.members || []);
+
+        const ex = await api(
+          `/api/expenses/group/${id}`
+        );
+
         setExpenses(ex);
       } catch (err) {
         console.error(err);
+        alert(err.message);
       }
     }
+
     load();
   }, [id]);
 
   async function addExpense(e) {
     e.preventDefault();
+
+    if (members.length === 0) {
+      alert("Add members before creating an expense.");
+      return;
+    }
+
+    const numericAmount = Number(amount);
+
+    if (
+      !Number.isFinite(numericAmount) ||
+      numericAmount <= 0
+    ) {
+      alert("Enter a valid amount.");
+      return;
+    }
+
     try {
-      const share = Number(amount) / members.length;
-      const splits = members.map((m) => ({ user: m._id, share }));
+      /*
+       * Equal split.
+       * The last member receives the rounding remainder
+       * so that the split sum is exactly equal to the expense.
+       */
+      const baseShare = Number(
+        (numericAmount / members.length).toFixed(2)
+      );
+
+      const splits = [];
+      let allocated = 0;
+
+      for (let i = 0; i < members.length; i++) {
+        let share = baseShare;
+
+        if (i === members.length - 1) {
+          share = Number(
+            (numericAmount - allocated).toFixed(2)
+          );
+        }
+
+        splits.push({
+          user: members[i]._id,
+          share,
+        });
+
+        allocated += share;
+      }
+
       await api("/api/expenses", "POST", {
         groupId: id,
         payer,
-        amount: Number(amount),
+        amount: numericAmount,
         splits,
         description,
       });
-      const ex = await api(`/api/expenses/group/${id}`);
-      setExpenses(ex);
+
+      const refreshedExpenses = await api(
+        `/api/expenses/group/${id}`
+      );
+
+      setExpenses(refreshedExpenses);
+
+      setPayer("");
       setAmount("");
       setDescription("");
+
+      // Expenses changed, so old settlement results are stale.
+      setSettlements([]);
+      setSettleExplanation("");
     } catch (err) {
       alert(err.message);
     }
@@ -55,157 +129,264 @@ export default function Groupvview() {
 
   async function addMember(e) {
     e.preventDefault();
+
+    if (!newMemberEmail.trim()) {
+      return;
+    }
+
     try {
-      const updatedGroup = await api(`/api/groups/${id}/add-member`, "PATCH", {
-        email: newMemberEmail,
-      });
+      const updatedGroup = await api(
+        `/api/groups/${id}/add-member`,
+        "PATCH",
+        {
+          email: newMemberEmail.trim(),
+        }
+      );
+
       setGroup(updatedGroup);
       setMembers(updatedGroup.members || []);
+
       setNewMemberEmail("");
+      setPayer("");
+
+      // Existing settlement output is now stale.
+      setSettlements([]);
+      setSettleExplanation("");
     } catch (err) {
       alert(err.message);
+    }
+  }
+
+  async function parseNL() {
+    if (!nlText.trim()) {
+      alert("Enter some expense text first.");
+      return;
+    }
+
+    if (members.length === 0) {
+      alert("Add group members before using AI parsing.");
+      return;
+    }
+
+    setLoadingAI(true);
+
+    try {
+      /*
+       * Send the natural-language text and group ID.
+       * The backend now sends this to Groq.
+       */
+      const response = await api(
+        "/api/ai/parse-expenses-text",
+        "POST",
+        {
+          text: nlText,
+          groupId: id,
+        }
+      );
+
+      const parsed = response.expenses || [];
+
+      if (parsed.length === 0) {
+        alert(
+          "I couldn't identify any valid expenses from that text."
+        );
+        return;
+      }
+
+      /*
+       * Convert payer names returned by Groq
+       * into actual MongoDB user IDs.
+       */
+      const nameToId = {};
+
+      members.forEach((member) => {
+        nameToId[
+          member.name.trim().toLowerCase()
+        ] = member._id;
+      });
+
+      let createdCount = 0;
+
+      for (const expense of parsed) {
+        const normalizedPayer =
+          expense.payerName
+            ?.trim()
+            .toLowerCase();
+
+        const payerId =
+          nameToId[normalizedPayer];
+
+        if (!payerId) {
+          console.warn(
+            "Skipping unknown payer:",
+            expense.payerName
+          );
+          continue;
+        }
+
+        const expenseAmount = Number(
+          expense.amount
+        );
+
+        if (
+          !Number.isFinite(expenseAmount) ||
+          expenseAmount <= 0
+        ) {
+          continue;
+        }
+
+        /*
+         * Equal split with rounding correction.
+         */
+        const baseShare = Number(
+          (
+            expenseAmount / members.length
+          ).toFixed(2)
+        );
+
+        const splits = [];
+        let allocated = 0;
+
+        for (let i = 0; i < members.length; i++) {
+          let share = baseShare;
+
+          if (i === members.length - 1) {
+            share = Number(
+              (
+                expenseAmount - allocated
+              ).toFixed(2)
+            );
+          }
+
+          splits.push({
+            user: members[i]._id,
+            share,
+          });
+
+          allocated += share;
+        }
+
+        /*
+         * Category now comes directly from Groq.
+         */
+        await api("/api/expenses", "POST", {
+          groupId: id,
+          payer: payerId,
+          amount: expenseAmount,
+          splits,
+          description:
+            expense.description || "Expense",
+          category: expense.category || "other",
+        });
+
+        createdCount++;
+      }
+
+      if (createdCount === 0) {
+        alert(
+          "The AI found expenses, but none of the payers matched your group members."
+        );
+        return;
+      }
+
+      const refreshedExpenses = await api(
+        `/api/expenses/group/${id}`
+      );
+
+      setExpenses(refreshedExpenses);
+      setNlText("");
+
+      setSettlements([]);
+      setSettleExplanation("");
+
+      alert(
+        `Successfully created ${createdCount} expense${
+          createdCount === 1 ? "" : "s"
+        }.`
+      );
+    } catch (err) {
+      console.error("AI parsing error:", err);
+
+      alert(
+        err.message ||
+          "AI parsing failed."
+      );
+    } finally {
+      setLoadingAI(false);
     }
   }
 
   async function loadSettlements() {
     try {
-      const res = await api(`/api/expenses/settlements/${id}`);
-      setSettlements(res.transfers || []);
-      if (res.transfers?.length) {
-        const usersMap = {};
-        for (const m of members) usersMap[m._id] = m.name;
-        const exp = await api("/api/ai/explain-settlements", "POST", {
-          transfers: res.transfers,
-          users: usersMap,
-        });
-        setSettleExplanation(exp.explanation);
-      } else {
-        setSettleExplanation("No settlements needed.");
-      }
-    } catch (err) {
-      alert(err.message);
-    }
-  }
-
-async function parseNL() {
-  if (!nlText.trim()) {
-    alert("Enter some expense text first.");
-    return;
-  }
-
-  if (members.length === 0) {
-    alert("Add group members before using AI parsing.");
-    return;
-  }
-
-  setLoadingAI(true);
-
-  try {
-    const resp = await api(
-      "/api/ai/parse-expenses-text",
-      "POST",
-      {
-        text: nlText,
-        groupId: id,
-      }
-    );
-
-    const parsed = resp.expenses || [];
-
-    if (parsed.length === 0) {
-      alert(
-        "I couldn't identify any valid expenses from that text."
+      const response = await api(
+        `/api/expenses/settlements/${id}`
       );
-      return;
-    }
 
-    const nameToId = {};
+      const transfers =
+        response.transfers || [];
 
-    members.forEach((member) => {
-      nameToId[member.name.trim().toLowerCase()] =
-        member._id;
-    });
+      setSettlements(transfers);
 
-    let createdCount = 0;
-
-    for (const expense of parsed) {
-      const payerId =
-        nameToId[
-          expense.payerName.trim().toLowerCase()
-        ];
-
-      if (!payerId) {
-        console.warn(
-          "Skipping expense because payer was not found:",
-          expense.payerName
+      if (transfers.length === 0) {
+        setSettleExplanation(
+          "No settlements needed. Everyone is already balanced."
         );
-        continue;
+        return;
       }
 
-      const amount = Number(expense.amount);
+      const usersMap = {};
 
-      if (!Number.isFinite(amount) || amount <= 0) {
-        continue;
-      }
-
-      /*
-       * SettleFlow currently splits expenses equally.
-       */
-      const share = Number(
-        (amount / members.length).toFixed(2)
-      );
-
-      const splits = members.map((member) => ({
-        user: member._id,
-        share,
-      }));
-
-      /*
-       * Send the AI-generated category to the backend.
-       */
-      await api("/api/expenses", "POST", {
-        groupId: id,
-        payer: payerId,
-        amount,
-        splits,
-        description: expense.description,
-        category: expense.category,
+      members.forEach((member) => {
+        usersMap[member._id] =
+          member.name;
       });
 
-      createdCount++;
-    }
-
-    if (createdCount === 0) {
-      alert(
-        "The AI found expenses, but none of the payers matched your group members."
+      const explanation = await api(
+        "/api/ai/explain-settlements",
+        "POST",
+        {
+          transfers,
+          users: usersMap,
+        }
       );
+
+      setSettleExplanation(
+        explanation.explanation
+      );
+    } catch (err) {
+      console.error(err);
+
+      alert(
+        err.message ||
+          "Could not compute settlements."
+      );
+    }
+  }
+
+  async function deleteExpense(expenseId) {
+    const confirmed = window.confirm(
+      "Delete this expense?"
+    );
+
+    if (!confirmed) {
       return;
     }
 
-    const refreshedExpenses = await api(
-      `/api/expenses/group/${id}`
-    );
-
-    setExpenses(refreshedExpenses);
-    setNlText("");
-
-    alert(
-      `Successfully created ${createdCount} expense${
-        createdCount === 1 ? "" : "s"
-      }.`
-    );
-  } catch (error) {
-    console.error(error);
-    alert(error.message || "AI parsing failed.");
-  } finally {
-    setLoadingAI(false);
-  }
-}
-
-  async function deleteExpense(expenseId) {
     try {
-      await api(`/api/expenses/${expenseId}`, "DELETE");
-      setExpenses((prev) => prev.filter((e) => e._id !== expenseId));
+      await api(
+        `/api/expenses/${expenseId}`,
+        "DELETE"
+      );
+
+      setExpenses((prev) =>
+        prev.filter(
+          (expense) =>
+            expense._id !== expenseId
+        )
+      );
+
+      setSettlements([]);
+      setSettleExplanation("");
     } catch (err) {
       alert(err.message);
     }
@@ -213,163 +394,248 @@ async function parseNL() {
 
   return (
     <div className="space-y-6">
+      {/* Header */}
       <div>
         <h2 className="text-xl font-semibold text-slate-800 dark:text-slate-100">
           {group?.name || "Group"}
         </h2>
+
         <p className="text-sm text-slate-500 dark:text-slate-400">
-          {members.length} member{members.length !== 1 && "s"}
+          {members.length} member
+          {members.length !== 1 && "s"}
         </p>
       </div>
 
       <div className="grid gap-6 lg:grid-cols-3">
-        {/* Left column */}
+        {/* LEFT COLUMN */}
         <div className="space-y-4 lg:col-span-1">
-          <div className="bg-white dark:bg-slate-900 rounded-xl shadow-sm border border-slate-200 dark:border-slate-800 p-4">
-            <h3 className="text-sm font-medium text-slate-800 dark:text-slate-100 mb-3">
+          {/* Add member */}
+          <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+            <h3 className="mb-3 text-sm font-medium text-slate-800 dark:text-slate-100">
               Add member
             </h3>
-            <form onSubmit={addMember} className="space-y-3">
+
+            <form
+              onSubmit={addMember}
+              className="space-y-3"
+            >
               <input
-                className="w-full rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-slate-900 focus:border-slate-900"
+                type="email"
+                required
+                className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
                 placeholder="Friend's email (registered user)"
                 value={newMemberEmail}
-                onChange={(e) => setNewMemberEmail(e.target.value)}
+                onChange={(e) =>
+                  setNewMemberEmail(
+                    e.target.value
+                  )
+                }
               />
-              <button className="w-full rounded-md bg-slate-900 text-slate-50 py-2 text-sm font-medium hover:bg-slate-800 transition-colors">
+
+              <button
+                type="submit"
+                className="w-full rounded-md bg-indigo-500 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-600"
+              >
                 Add member
               </button>
             </form>
           </div>
 
-          <div className="bg-white dark:bg-slate-900 rounded-xl shadow-sm border border-slate-200 dark:border-slate-800 p-4">
-            <h3 className="text-sm font-medium text-slate-800 dark:text-slate-100 mb-3">
+          {/* Add expense */}
+          <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+            <h3 className="mb-3 text-sm font-medium text-slate-800 dark:text-slate-100">
               Add expense
             </h3>
-            <form onSubmit={addExpense} className="space-y-3">
+
+            <form
+              onSubmit={addExpense}
+              className="space-y-3"
+            >
               <div>
-                <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">
+                <label className="mb-1 block text-xs text-slate-500 dark:text-slate-400">
                   Payer
                 </label>
+
                 <select
                   value={payer}
-                  onChange={(e) => setPayer(e.target.value)}
+                  onChange={(e) =>
+                    setPayer(
+                      e.target.value
+                    )
+                  }
                   required
-                  className="w-full rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-slate-900 focus:border-slate-900"
+                  className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
                 >
-                  <option value="">Select</option>
-                  {members.map((m) => (
-                    <option key={m._id} value={m._id}>
-                      {m.name}
-                    </option>
-                  ))}
+                  <option value="">
+                    Select
+                  </option>
+
+                  {members.map(
+                    (member) => (
+                      <option
+                        key={member._id}
+                        value={member._id}
+                      >
+                        {member.name}
+                      </option>
+                    )
+                  )}
                 </select>
               </div>
+
               <div>
-                <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">
+                <label className="mb-1 block text-xs text-slate-500 dark:text-slate-400">
                   Amount
                 </label>
+
                 <input
-                  className="w-full rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-slate-900 focus:border-slate-900"
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  required
+                  className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
                   placeholder="Amount (₹)"
                   value={amount}
-                  onChange={(e) => setAmount(e.target.value)}
-                  required
+                  onChange={(e) =>
+                    setAmount(
+                      e.target.value
+                    )
+                  }
                 />
               </div>
+
               <div>
-                <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">
+                <label className="mb-1 block text-xs text-slate-500 dark:text-slate-400">
                   Description
                 </label>
+
                 <input
-                  className="w-full rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-slate-900 focus:border-slate-900"
+                  className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
                   placeholder="e.g. Dinner at Pizza Hut"
                   value={description}
-                  onChange={(e) => setDescription(e.target.value)}
+                  onChange={(e) =>
+                    setDescription(
+                      e.target.value
+                    )
+                  }
                 />
               </div>
-              <button className="w-full rounded-md bg-slate-900 text-slate-50 py-2 text-sm font-medium hover:bg-slate-800 transition-colors">
+
+              <button
+                type="submit"
+                className="w-full rounded-md bg-indigo-500 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-600"
+              >
                 Add expense
               </button>
             </form>
           </div>
         </div>
 
-        {/* Middle column */}
+        {/* MIDDLE COLUMN */}
         <div className="space-y-4 lg:col-span-1">
-          <div className="bg-white dark:bg-slate-900 rounded-xl shadow-sm border border-slate-200 dark:border-slate-800 p-4">
-            <h3 className="text-sm font-medium text-slate-800 dark:text-slate-100 mb-2">
+          {/* AI parser */}
+          <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+            <h3 className="mb-2 text-sm font-medium text-slate-800 dark:text-slate-100">
               Quick add from text
             </h3>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">
-              Example: &quot;I paid 1200 for hotel, Rohit paid 600 for dinner,
-              Aman paid 300 for snacks&quot;
+
+            <p className="mb-3 text-xs text-slate-500 dark:text-slate-400">
+              Describe expenses naturally and SettleFlow will extract them automatically.
             </p>
+
             <textarea
-              rows={4}
-              className="w-full rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-slate-900 focus:border-slate-900"
-              placeholder="Describe the shared expenses in one sentence..."
+              rows={5}
+              className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+              placeholder="Example: I paid 1200 for the hotel, Rahul paid 600 for dinner, and Aman paid 300 for snacks."
               value={nlText}
-              onChange={(e) => setNlText(e.target.value)}
+              onChange={(e) =>
+                setNlText(
+                  e.target.value
+                )
+              }
             />
+
             <button
+              type="button"
               onClick={parseNL}
               disabled={loadingAI}
-              className="mt-2 w-full rounded-md bg-slate-900 text-slate-50 py-2 text-sm font-medium hover:bg-slate-800 transition-colors disabled:opacity-60"
+              className="mt-3 w-full rounded-md bg-indigo-500 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-600 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              {loadingAI ? "Processing..." : "Parse & create expenses"}
+              {loadingAI
+                ? "Processing..."
+                : "Parse & create expenses"}
             </button>
           </div>
 
-          <div className="bg-white dark:bg-slate-900 rounded-xl shadow-sm border border-slate-200 dark:border-slate-800 p-4">
-            <h3 className="text-sm font-medium text-slate-800 dark:text-slate-100 mb-3">
+          {/* Expenses */}
+          <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+            <h3 className="mb-3 text-sm font-medium text-slate-800 dark:text-slate-100">
               Expenses
             </h3>
+
             {expenses.length === 0 ? (
               <p className="text-sm text-slate-500 dark:text-slate-400">
                 No expenses yet. Add one to get started.
               </p>
             ) : (
               <ul className="space-y-2 text-sm">
-                {expenses.map((ex) => (
-                  <li
-                    key={ex._id}
-                    className="flex items-center justify-between rounded-md border border-slate-200 dark:border-slate-700 px-3 py-2"
-                  >
-                    <div>
-                      <div className="font-medium text-slate-800 dark:text-slate-100">
-                        {ex.description || "Expense"}{" "}
-                        <span className="text-xs text-slate-500 dark:text-slate-400">
-                          ({ex.category})
-                        </span>
-                      </div>
-                      <div className="text-xs text-slate-500 dark:text-slate-400">
-                        ₹{ex.amount} by {ex.payer?.name || "Unknown"}
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => deleteExpense(ex._id)}
-                      className="text-xs text-red-600 hover:text-red-700"
+                {expenses.map(
+                  (expense) => (
+                    <li
+                      key={expense._id}
+                      className="flex items-center justify-between rounded-md border border-slate-200 px-3 py-2 dark:border-slate-700"
                     >
-                      Delete
-                    </button>
-                  </li>
-                ))}
+                      <div>
+                        <div className="font-medium text-slate-800 dark:text-slate-100">
+                          {expense.description ||
+                            "Expense"}
+
+                          <span className="ml-1 text-xs text-slate-500 dark:text-slate-400">
+                            (
+                            {expense.category ||
+                              "other"}
+                            )
+                          </span>
+                        </div>
+
+                        <div className="text-xs text-slate-500 dark:text-slate-400">
+                          ₹{expense.amount} by{" "}
+                          {expense.payer?.name ||
+                            "Unknown"}
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          deleteExpense(
+                            expense._id
+                          )
+                        }
+                        className="text-xs text-red-600 hover:text-red-700"
+                      >
+                        Delete
+                      </button>
+                    </li>
+                  )
+                )}
               </ul>
             )}
           </div>
         </div>
 
-        {/* Right column */}
+        {/* RIGHT COLUMN */}
         <div className="space-y-4 lg:col-span-1">
-          <div className="bg-white dark:bg-slate-900 rounded-xl shadow-sm border border-slate-200 dark:border-slate-800 p-4">
-            <div className="flex items-center justify-between mb-3">
+          <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+            <div className="mb-3 flex items-center justify-between">
               <h3 className="text-sm font-medium text-slate-800 dark:text-slate-100">
                 Settlements
               </h3>
+
               <button
+                type="button"
                 onClick={loadSettlements}
-                className="text-xs px-3 py-1 rounded-md border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800"
+                className="rounded-md border border-slate-300 px-3 py-1 text-xs hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"
               >
                 Compute
               </button>
@@ -380,21 +646,43 @@ async function parseNL() {
                 No settlements computed yet.
               </p>
             ) : (
-              <ul className="space-y-1 text-sm mb-3 text-slate-800 dark:text-slate-100">
-                {settlements.map((t, idx) => {
-                  const from = members.find((m) => m._id === t.from);
-                  const to = members.find((m) => m._id === t.to);
-                  return (
-                    <li key={idx}>
-                      {from?.name} pays {to?.name} ₹{t.amount}
-                    </li>
-                  );
-                })}
+              <ul className="mb-3 space-y-2 text-sm text-slate-800 dark:text-slate-100">
+                {settlements.map(
+                  (transfer, index) => {
+                    const from =
+                      members.find(
+                        (member) =>
+                          member._id ===
+                          transfer.from
+                      );
+
+                    const to =
+                      members.find(
+                        (member) =>
+                          member._id ===
+                          transfer.to
+                      );
+
+                    return (
+                      <li
+                        key={index}
+                        className="rounded-md border border-slate-200 p-2 dark:border-slate-700"
+                      >
+                        {from?.name ||
+                          "Unknown"}{" "}
+                        pays{" "}
+                        {to?.name ||
+                          "Unknown"}{" "}
+                        ₹{transfer.amount}
+                      </li>
+                    );
+                  }
+                )}
               </ul>
             )}
 
             {settleExplanation && (
-              <div className="mt-2 rounded-md bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 p-2 text-xs text-slate-600 dark:text-slate-300 whitespace-pre-wrap">
+              <div className="mt-2 whitespace-pre-wrap rounded-md border border-slate-200 bg-slate-50 p-3 text-xs leading-5 text-slate-600 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300">
                 {settleExplanation}
               </div>
             )}

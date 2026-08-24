@@ -15,81 +15,77 @@ const router = express.Router();
 
 /*
  * POST /api/ai/parse-expenses-text
- *
- * Body:
- * {
- *   text: "...",
- *   groupId: "..."
- * }
  */
-router.post("/parse-expenses-text", auth, async (req, res) => {
-  try {
-    const { text, groupId } = req.body;
+router.post(
+  "/parse-expenses-text",
+  auth,
+  async (req, res) => {
+    try {
+      const { text, groupId } = req.body;
 
-    if (!text?.trim()) {
-      return res.status(400).json({
-        message: "Expense text is required",
+      if (!text?.trim()) {
+        return res.status(400).json({
+          message: "Expense text is required",
+        });
+      }
+
+      if (!groupId) {
+        return res.status(400).json({
+          message: "Group ID is required",
+        });
+      }
+
+      const group = await Group.findById(
+        groupId
+      ).populate("members", "name email");
+
+      if (!group) {
+        return res.status(404).json({
+          message: "Group not found",
+        });
+      }
+
+      // Make sure the current user belongs to the group.
+      const isMember = group.members.some(
+        (member) =>
+          member._id.toString() === req.user.id
+      );
+
+      if (!isMember) {
+        return res.status(403).json({
+          message: "You are not a member of this group",
+        });
+      }
+
+      const currentUser = await User.findById(
+        req.user.id
+      ).select("name email");
+
+      if (!currentUser) {
+        return res.status(404).json({
+          message: "Current user not found",
+        });
+      }
+
+      const expenses =
+        await parseNaturalLanguageExpenses({
+          text,
+          members: group.members,
+          currentUserName: currentUser.name,
+        });
+
+      return res.json({
+        expenses,
+      });
+    } catch (error) {
+      console.error("Groq parsing error:", error);
+
+      return res.status(500).json({
+        message: "AI parsing failed",
       });
     }
-
-    if (!groupId) {
-      return res.status(400).json({
-        message: "Group ID is required",
-      });
-    }
-
-    const group = await Group.findById(groupId).populate(
-      "members",
-      "name email"
-    );
-
-    if (!group) {
-      return res.status(404).json({
-        message: "Group not found",
-      });
-    }
-
-    /*
-     * Authorization:
-     * user must belong to this group.
-     */
-    const isMember = group.members.some(
-      (member) => member._id.toString() === req.user.id
-    );
-
-    if (!isMember) {
-      return res.status(403).json({
-        message: "You are not a member of this group",
-      });
-    }
-
-    const currentUser = await User.findById(req.user.id).select(
-      "name email"
-    );
-
-    if (!currentUser) {
-      return res.status(404).json({
-        message: "Current user not found",
-      });
-    }
-
-    const expenses = await parseNaturalLanguageExpenses({
-      text,
-      members: group.members,
-      currentUserName: currentUser.name,
-    });
-
-    return res.json({
-      expenses,
-    });
-  } catch (error) {
-    console.error("AI parsing error:", error);
-
-    return res.status(500).json({
-      message: "AI parsing failed",
-    });
   }
-});
+);
 
 /*
  * GET /api/ai/monthly-insights/:groupId
@@ -101,9 +97,9 @@ router.get(
     try {
       const { groupId } = req.params;
 
-      const group = await Group.findById(groupId).select(
-        "members name"
-      );
+      const group = await Group.findById(
+        groupId
+      ).select("members name");
 
       if (!group) {
         return res.status(404).json({
@@ -112,7 +108,8 @@ router.get(
       }
 
       const isMember = group.members.some(
-        (memberId) => memberId.toString() === req.user.id
+        (memberId) =>
+          memberId.toString() === req.user.id
       );
 
       if (!isMember) {
@@ -146,25 +143,29 @@ router.get(
       for (const expense of expenses) {
         stats.total += expense.amount;
 
-        const category = expense.category || "other";
+        const category =
+          expense.category || "other";
 
         stats.byCategory[category] =
           (stats.byCategory[category] || 0) +
           expense.amount;
       }
 
-      stats.total = Number(stats.total.toFixed(2));
+      stats.total = Number(
+        stats.total.toFixed(2)
+      );
 
-      const summary = await generateInsightsSummary(stats);
+      const summary =
+        await generateInsightsSummary(stats);
 
-      res.json({
+      return res.json({
         stats,
         summary,
       });
     } catch (error) {
-      console.error("AI insights error:", error);
+      console.error("Groq insights error:", error);
 
-      res.status(500).json({
+      return res.status(500).json({
         message: "AI insights failed",
       });
     }
@@ -187,21 +188,22 @@ router.post(
         });
       }
 
-      const explanation = await explainSettlements(
-        transfers,
-        users
-      );
+      const explanation =
+        await explainSettlements(
+          transfers,
+          users
+        );
 
-      res.json({
+      return res.json({
         explanation,
       });
     } catch (error) {
       console.error(
-        "AI settlement explanation error:",
+        "Groq settlement explanation error:",
         error
       );
 
-      res.status(500).json({
+      return res.status(500).json({
         message: "AI explanation failed",
       });
     }
