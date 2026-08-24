@@ -21,55 +21,14 @@ const EXPENSE_CATEGORIES = [
 
 const ExpenseItemSchema = z.object({
   payerName: z.string().min(1),
-  amount: z.number().positive(),
+  amount: z.coerce.number().positive(),
   description: z.string().min(1),
-  category: z.enum(EXPENSE_CATEGORIES),
+  category: z.string().min(1),
 });
 
 const ParsedExpensesSchema = z.object({
   expenses: z.array(ExpenseItemSchema),
 });
-
-const expenseJsonSchema = {
-  type: "object",
-  properties: {
-    expenses: {
-      type: "array",
-      items: {
-        type: "object",
-        properties: {
-          payerName: {
-            type: "string",
-            description:
-              "Name of the person who paid for the expense.",
-          },
-          amount: {
-            type: "number",
-            description: "Positive numeric expense amount.",
-          },
-          description: {
-            type: "string",
-            description: "Short description of the expense.",
-          },
-          category: {
-            type: "string",
-            enum: EXPENSE_CATEGORIES,
-            description: "Expense category.",
-          },
-        },
-        required: [
-          "payerName",
-          "amount",
-          "description",
-          "category",
-        ],
-        additionalProperties: false,
-      },
-    },
-  },
-  required: ["expenses"],
-  additionalProperties: false,
-};
 
 function getGroqClient() {
   if (!process.env.GROQ_API_KEY) {
@@ -79,8 +38,80 @@ function getGroqClient() {
   return groq;
 }
 
-/**
- * Converts natural language into structured expenses.
+function normalizeCategory(category) {
+  if (!category) return "other";
+
+  const normalized = category
+    .trim()
+    .toLowerCase();
+
+  const aliases = {
+    food: "food",
+    restaurant: "food",
+    dining: "food",
+    groceries: "food",
+
+    travel: "travel",
+    transport: "travel",
+    transportation: "travel",
+    cab: "travel",
+    taxi: "travel",
+    uber: "travel",
+
+    rent: "rent",
+
+    utilities: "utilities",
+    utility: "utilities",
+    electricity: "utilities",
+    water: "utilities",
+    internet: "utilities",
+    wifi: "utilities",
+
+    shopping: "shopping",
+
+    entertainment: "entertainment",
+    movie: "entertainment",
+    movies: "entertainment",
+
+    college: "college",
+    education: "college",
+
+    other: "other",
+  };
+
+  return aliases[normalized] || "other";
+}
+
+function normalizePayerName(
+  payerName,
+  currentUserName
+) {
+  if (!payerName) {
+    return "";
+  }
+
+  const normalized =
+    payerName.trim().toLowerCase();
+
+  const currentUserAliases = [
+    "i",
+    "me",
+    "myself",
+    "user",
+    "current user",
+  ];
+
+  if (
+    currentUserAliases.includes(normalized)
+  ) {
+    return currentUserName;
+  }
+
+  return payerName.trim();
+}
+
+/*
+ * Groq LLM → structured JSON → Zod → business validation
  */
 export async function parseNaturalLanguageExpenses({
   text,
@@ -88,29 +119,49 @@ export async function parseNaturalLanguageExpenses({
   currentUserName,
 }) {
   if (!text?.trim()) {
-    throw new Error("Expense text is required");
+    throw new Error(
+      "Expense text is required"
+    );
   }
 
-  if (!members || members.length === 0) {
-    throw new Error("Group members are required");
+  if (!members?.length) {
+    throw new Error(
+      "Group members are required"
+    );
   }
 
-  const memberNames = members.map((member) => member.name);
+  const memberNames = members.map(
+    (member) => member.name
+  );
 
-  const systemPrompt = `
-You are the natural-language expense extraction engine for SettleFlow.
+  const prompt = `
+You are the expense extraction engine for SettleFlow.
 
-Convert the user's casual expense description into structured expense records.
+Extract every clearly identifiable expense from the user's text.
 
-RULES:
+Return ONLY valid JSON in exactly this format:
 
-1. Only use payer names that exist in the provided group members.
-2. If the user says "I" or "me", use the current user's name.
-3. Never invent a payer.
-4. Extract every clearly identifiable expense.
-5. Amount must be a positive number.
-6. Keep descriptions short and readable.
-7. Category MUST be exactly one of:
+{
+  "expenses": [
+    {
+      "payerName": "exact person name",
+      "amount": 250,
+      "description": "pizza",
+      "category": "food"
+    }
+  ]
+}
+
+Rules:
+
+1. payerName MUST correspond to a person in the group.
+2. If the user says "I", "me", or "myself", use:
+   "${currentUserName}"
+3. Never output "User" when "I" refers to the current user.
+4. Never invent people.
+5. amount must be a positive number.
+6. description must be short.
+7. category MUST be one of:
    food
    travel
    rent
@@ -119,123 +170,188 @@ RULES:
    entertainment
    college
    other
-8. If category is unclear, use "other".
-9. Do not calculate individual splits.
-10. Ignore text that does not clearly describe an expense.
-11. Do not return explanations or extra text.
+8. Use lowercase category values.
+9. Extract every distinct expense you can identify.
+10. Do not calculate splits.
+11. Ignore text that isn't clearly an expense.
+12. Return JSON only.
 
 Current user:
 ${currentUserName}
 
 Valid group members:
 ${memberNames.join(", ")}
+
+User input:
+${text}
 `;
 
-  const response = await getGroqClient().chat.completions.create({
-    model: "openai/gpt-oss-20b",
+  let response;
 
-    messages: [
-      {
-        role: "system",
-        content: systemPrompt,
-      },
-      {
-        role: "user",
-        content: text,
-      },
-    ],
+  try {
+    response =
+      await getGroqClient().chat.completions.create({
+        model: "openai/gpt-oss-20b",
 
-    temperature: 0,
+        messages: [
+          {
+            role: "system",
+            content: prompt,
+          },
+        ],
 
-    response_format: {
-      type: "json_schema",
-      json_schema: {
-        name: "settleflow_expenses",
-        strict: true,
-        schema: expenseJsonSchema,
-      },
-    },
-  });
+        temperature: 0,
+
+        response_format: {
+          type: "json_object",
+        },
+      });
+  } catch (error) {
+    console.error(
+      "========== GROQ API ERROR =========="
+    );
+    console.error(error);
+    console.error(
+      "===================================="
+    );
+
+    throw new Error(
+      error?.message ||
+        "Groq API request failed"
+    );
+  }
 
   const content =
     response.choices?.[0]?.message?.content;
 
   if (!content) {
-    throw new Error("Groq returned an empty response");
+    throw new Error(
+      "Groq returned an empty response"
+    );
   }
+
+  console.log(
+    "Raw Groq expense response:",
+    content
+  );
 
   let parsed;
 
   try {
     parsed = JSON.parse(content);
   } catch (error) {
-    console.error("Invalid Groq JSON:", content);
-    throw new Error("Groq returned invalid structured data");
-  }
-
-  // Schema validation
-  const validated = ParsedExpensesSchema.parse(parsed);
-
-  // Application-level validation
-  const validExpenses = [];
-
-  for (const expense of validated.expenses) {
-    const matchedMember = members.find(
-      (member) =>
-        member.name.trim().toLowerCase() ===
-        expense.payerName.trim().toLowerCase()
+    console.error(
+      "Groq returned invalid JSON:",
+      content
     );
 
-    // Never allow the model to invent a member.
+    throw new Error(
+      "Groq returned invalid JSON"
+    );
+  }
+
+  /*
+   * Validate structure.
+   */
+  const validated =
+    ParsedExpensesSchema.safeParse(
+      parsed
+    );
+
+  if (!validated.success) {
+    console.error(
+      "Groq schema validation failed:",
+      validated.error.flatten()
+    );
+
+    throw new Error(
+      "AI returned invalid expense data"
+    );
+  }
+
+  const validExpenses = [];
+
+  /*
+   * Application-level validation.
+   */
+  for (const expense of validated.data.expenses) {
+    const normalizedPayer =
+      normalizePayerName(
+        expense.payerName,
+        currentUserName
+      );
+
+    const matchedMember =
+      members.find(
+        (member) =>
+          member.name
+            .trim()
+            .toLowerCase() ===
+          normalizedPayer
+            .trim()
+            .toLowerCase()
+      );
+
+    /*
+     * Critical security/business rule:
+     * the LLM cannot invent a group member.
+     */
     if (!matchedMember) {
+      console.warn(
+        "Skipping unknown payer:",
+        expense.payerName
+      );
+
       continue;
     }
 
+    const numericAmount =
+      Number(expense.amount);
+
     if (
-      !Number.isFinite(expense.amount) ||
-      expense.amount <= 0
+      !Number.isFinite(
+        numericAmount
+      ) ||
+      numericAmount <= 0
     ) {
       continue;
     }
 
     validExpenses.push({
       payerName: matchedMember.name,
-      amount: Number(expense.amount.toFixed(2)),
-      description: expense.description.trim(),
-      category: expense.category,
+      amount: Number(
+        numericAmount.toFixed(2)
+      ),
+      description:
+        expense.description.trim(),
+      category: normalizeCategory(
+        expense.category
+      ),
     });
   }
 
   return validExpenses;
 }
 
-/**
- * Categorize a manually entered expense.
+/*
+ * Categorize manually entered expenses.
  */
-export async function categorizeExpense(description) {
+export async function categorizeExpense(
+  description
+) {
   if (!description?.trim()) {
     return "other";
   }
 
-  const categorySchema = {
-    type: "object",
-    properties: {
-      category: {
-        type: "string",
-        enum: EXPENSE_CATEGORIES,
-      },
-    },
-    required: ["category"],
-    additionalProperties: false,
-  };
+  try {
+    const response =
+      await getGroqClient().chat.completions.create({
+        model: "openai/gpt-oss-20b",
 
-  const response = await getGroqClient().chat.completions.create({
-    model: "openai/gpt-oss-20b",
-
-    messages: [
-      {
-        role: "system",
-        content: `
+        messages: [
+          {
+            role: "system",
+            content: `
 Classify the expense into exactly one category:
 
 food
@@ -247,144 +363,181 @@ entertainment
 college
 other
 
-Use "other" when uncertain.
+Return ONLY valid JSON:
+
+{
+  "category": "food"
+}
+
+Use "other" if uncertain.
 `,
-      },
-      {
-        role: "user",
-        content: description,
-      },
-    ],
+          },
+          {
+            role: "user",
+            content: description,
+          },
+        ],
 
-    temperature: 0,
+        temperature: 0,
 
-    response_format: {
-      type: "json_schema",
-      json_schema: {
-        name: "expense_category",
-        strict: true,
-        schema: categorySchema,
-      },
-    },
-  });
+        response_format: {
+          type: "json_object",
+        },
+      });
 
-  const content =
-    response.choices?.[0]?.message?.content;
+    const content =
+      response.choices?.[0]?.message
+        ?.content;
 
-  if (!content) {
-    return "other";
-  }
-
-  try {
-    const parsed = JSON.parse(content);
-
-    if (
-      EXPENSE_CATEGORIES.includes(parsed.category)
-    ) {
-      return parsed.category;
+    if (!content) {
+      return "other";
     }
 
-    return "other";
-  } catch {
+    const parsed =
+      JSON.parse(content);
+
+    return normalizeCategory(
+      parsed.category
+    );
+  } catch (error) {
+    console.error(
+      "Groq category error:",
+      error
+    );
+
     return "other";
   }
 }
 
-/**
- * Explain settlement transfers.
+/*
+ * Settlement explanation.
  */
 export async function explainSettlements(
   transfers,
   usersMap
 ) {
-  if (!transfers || transfers.length === 0) {
+  if (
+    !transfers ||
+    transfers.length === 0
+  ) {
     return "No settlements are required. Everyone is already balanced.";
   }
 
-  const prompt = `
-You are explaining a group expense settlement.
+  try {
+    const response =
+      await getGroqClient().chat.completions.create({
+        model: "openai/gpt-oss-20b",
 
-Users:
-${JSON.stringify(usersMap, null, 2)}
+        messages: [
+          {
+            role: "system",
+            content: `
+You explain group expense settlements.
 
-Transfers:
-${JSON.stringify(transfers, null, 2)}
+Use ONLY the supplied transfers.
+Do not invent transactions.
 
 Explain:
-1. Who pays whom.
-2. Why these transfers settle the balances.
-3. Why the number of transfers is compact.
+- who pays whom,
+- why the payments settle the balances,
+- why the transfer count is compact.
 
-Use only the supplied information.
-Do not invent any transactions.
-Keep the response concise.
-`;
+Keep the explanation concise.
+`,
+          },
+          {
+            role: "user",
+            content: `
+Users:
+${JSON.stringify(
+  usersMap,
+  null,
+  2
+)}
 
-  const response =
-    await getGroqClient().chat.completions.create({
-      model: "openai/gpt-oss-20b",
+Transfers:
+${JSON.stringify(
+  transfers,
+  null,
+  2
+)}
+`,
+          },
+        ],
 
-      messages: [
-        {
-          role: "system",
-          content:
-            "You explain financial settlements accurately and concisely.",
-        },
-        {
-          role: "user",
-          content: prompt,
-        },
-      ],
+        temperature: 0.2,
+      });
 
-      temperature: 0.2,
-    });
+    return (
+      response.choices?.[0]?.message
+        ?.content?.trim() ||
+      "Unable to generate settlement explanation."
+    );
+  } catch (error) {
+    console.error(
+      "Groq settlement explanation error:",
+      error
+    );
 
-  return (
-    response.choices?.[0]?.message?.content?.trim() ||
-    "Unable to generate settlement explanation."
-  );
+    throw new Error(
+      "Settlement explanation failed"
+    );
+  }
 }
 
-/**
- * Generate monthly spending insights.
+/*
+ * Monthly insights.
  */
-export async function generateInsightsSummary(stats) {
-  const prompt = `
-Analyze these SettleFlow spending statistics:
+export async function generateInsightsSummary(
+  stats
+) {
+  try {
+    const response =
+      await getGroqClient().chat.completions.create({
+        model: "openai/gpt-oss-20b",
 
-${JSON.stringify(stats, null, 2)}
+        messages: [
+          {
+            role: "system",
+            content: `
+You are a concise expense analysis assistant.
 
-Provide:
-- the highest spending category,
-- an important spending pattern,
+Analyze only the supplied statistics.
+
+Mention:
+- highest spending category,
+- one notable pattern,
 - one practical observation.
 
-Use only the supplied numbers.
-Do not invent data.
-Keep the answer concise.
-`;
+Never invent numbers.
+`,
+          },
+          {
+            role: "user",
+            content: JSON.stringify(
+              stats,
+              null,
+              2
+            ),
+          },
+        ],
 
-  const response =
-    await getGroqClient().chat.completions.create({
-      model: "openai/gpt-oss-20b",
+        temperature: 0.2,
+      });
 
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are a concise expense analysis assistant. Only use supplied data.",
-        },
-        {
-          role: "user",
-          content: prompt,
-        },
-      ],
+    return (
+      response.choices?.[0]?.message
+        ?.content?.trim() ||
+      "Unable to generate insights."
+    );
+  } catch (error) {
+    console.error(
+      "Groq insights error:",
+      error
+    );
 
-      temperature: 0.2,
-    });
-
-  return (
-    response.choices?.[0]?.message?.content?.trim() ||
-    "Unable to generate insights."
-  );
+    throw new Error(
+      "Insights generation failed"
+    );
+  }
 }

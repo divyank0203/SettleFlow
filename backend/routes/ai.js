@@ -77,13 +77,18 @@ router.post(
       return res.json({
         expenses,
       });
-    } catch (error) {
-      console.error("Groq parsing error:", error);
+} catch (error) {
+  console.error("========== GROQ ERROR ==========");
+  console.error(error);
+  console.error("================================");
 
-      return res.status(500).json({
-        message: "AI parsing failed",
-      });
-    }
+  return res.status(500).json({
+    message:
+      error?.message ||
+      error?.error?.message ||
+      "AI parsing failed",
+  });
+}
   }
 );
 
