@@ -9,7 +9,7 @@ const router = express.Router();
 // Add expense (with AI category)
 router.post("/", auth, async (req, res) => {
   try {
-    const { groupId, payer, amount, splits, description } = req.body;
+    const { groupId, payer, amount, splits, description, category } = req.body;
     if (!groupId || !payer || !amount || !splits)
       return res.status(400).json({ message: "Missing fields" });
 
@@ -24,14 +24,20 @@ router.post("/", auth, async (req, res) => {
         return res.status(400).json({ message: "Split user not in group" });
     }
 
-    let category = "other";
-    if (description) {
-      try {
-        category = await categorizeExpense(description);
-      } catch (err) {
-        console.warn("AI category failed, using default:", err.message);
-      }
-    }
+let finalCategory = category || "other";
+
+if (!category && description) {
+  try {
+    finalCategory = await categorizeExpense(description);
+  } catch (error) {
+    console.warn(
+      "AI categorization failed, using other:",
+      error.message
+    );
+
+    finalCategory = "other";
+  }
+}
 
     const expense = await Expense.create({
       groupId,
@@ -39,7 +45,7 @@ router.post("/", auth, async (req, res) => {
       amount,
       splits,
       description,
-      category
+      category: finalCategory
     });
     res.json(expense);
   } catch (err) {

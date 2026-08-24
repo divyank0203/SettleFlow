@@ -87,63 +87,120 @@ export default function Groupvview() {
     }
   }
 
-  async function parseNL() {
-    setLoadingAI(true);
-    try {
-      const resp = await api("/api/ai/parse-expenses-text", "POST", {
-        text: nlText,
-      });
-      const parsed = resp.expenses || [];
-
-      if (!parsed.length) {
-        alert("AI could not parse any expenses.");
-        return;
-      }
-
-      const nameToId = {};
-      members.forEach((m) => {
-        nameToId[m.name.toLowerCase()] = m._id;
-      });
-
-      let createdCount = 0;
-
-      for (const exp of parsed) {
-        const payerId = nameToId[exp.payerName.toLowerCase()];
-        if (!payerId) continue;
-
-        const amt = Number(exp.amount);
-        if (!amt || isNaN(amt)) continue;
-
-        const share = amt / members.length;
-        const splits = members.map((m) => ({ user: m._id, share }));
-
-        await api("/api/expenses", "POST", {
-          groupId: id,
-          payer: payerId,
-          amount: amt,
-          splits,
-          description: exp.description || "AI parsed expense",
-        });
-
-        createdCount++;
-      }
-
-      if (createdCount === 0) {
-        alert(
-          "AI parsed text but could not match any payers to group members. Check names."
-        );
-      } else {
-        const ex = await api(`/api/expenses/group/${id}`);
-        setExpenses(ex);
-        setNlText("");
-        alert(`AI created ${createdCount} expenses.`);
-      }
-    } catch (err) {
-      alert(err.message);
-    } finally {
-      setLoadingAI(false);
-    }
+async function parseNL() {
+  if (!nlText.trim()) {
+    alert("Enter some expense text first.");
+    return;
   }
+
+  if (members.length === 0) {
+    alert("Add group members before using AI parsing.");
+    return;
+  }
+
+  setLoadingAI(true);
+
+  try {
+    const resp = await api(
+      "/api/ai/parse-expenses-text",
+      "POST",
+      {
+        text: nlText,
+        groupId: id,
+      }
+    );
+
+    const parsed = resp.expenses || [];
+
+    if (parsed.length === 0) {
+      alert(
+        "I couldn't identify any valid expenses from that text."
+      );
+      return;
+    }
+
+    const nameToId = {};
+
+    members.forEach((member) => {
+      nameToId[member.name.trim().toLowerCase()] =
+        member._id;
+    });
+
+    let createdCount = 0;
+
+    for (const expense of parsed) {
+      const payerId =
+        nameToId[
+          expense.payerName.trim().toLowerCase()
+        ];
+
+      if (!payerId) {
+        console.warn(
+          "Skipping expense because payer was not found:",
+          expense.payerName
+        );
+        continue;
+      }
+
+      const amount = Number(expense.amount);
+
+      if (!Number.isFinite(amount) || amount <= 0) {
+        continue;
+      }
+
+      /*
+       * SettleFlow currently splits expenses equally.
+       */
+      const share = Number(
+        (amount / members.length).toFixed(2)
+      );
+
+      const splits = members.map((member) => ({
+        user: member._id,
+        share,
+      }));
+
+      /*
+       * Send the AI-generated category to the backend.
+       */
+      await api("/api/expenses", "POST", {
+        groupId: id,
+        payer: payerId,
+        amount,
+        splits,
+        description: expense.description,
+        category: expense.category,
+      });
+
+      createdCount++;
+    }
+
+    if (createdCount === 0) {
+      alert(
+        "The AI found expenses, but none of the payers matched your group members."
+      );
+      return;
+    }
+
+    const refreshedExpenses = await api(
+      `/api/expenses/group/${id}`
+    );
+
+    setExpenses(refreshedExpenses);
+    setNlText("");
+
+    alert(
+      `Successfully created ${createdCount} expense${
+        createdCount === 1 ? "" : "s"
+      }.`
+    );
+  } catch (error) {
+    console.error(error);
+    alert(error.message || "AI parsing failed.");
+  } finally {
+    setLoadingAI(false);
+  }
+}
 
   async function deleteExpense(expenseId) {
     try {

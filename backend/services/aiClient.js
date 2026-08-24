@@ -1,107 +1,293 @@
-// services/aiClient.js
-// "AI-lite" implementation without external API, so everything works reliably.
+import dotenv from "dotenv";
+dotenv.config();
 
-// 1) Categorize expense based on description keywords
-export async function categorizeExpense(description = "") {
-  const d = description.toLowerCase();
+import OpenAI from "openai";
+import { z } from "zod";
+import { zodTextFormat } from "openai/helpers/zod";
 
-  if (d.match(/pizza|food|biriyani|lunch|dinner|swiggy|zomato|restaurant/)) {
-    return "food";
-  }
-  if (d.match(/uber|ola|bus|train|flight|cab|taxi|auto/)) {
-    return "travel";
-  }
-  if (d.match(/rent|room|pg|hostel/)) {
-    return "rent";
-  }
-  if (d.match(/electricity|wifi|internet|water|gas|bill/)) {
-    return "utilities";
-  }
-  if (d.match(/shopping|amazon|flipkart|clothes|shoes|mall/)) {
-    return "shopping";
-  }
-  if (d.match(/movie|netflix|prime|party|club/)) {
-    return "entertainment";
-  }
-  if (d.match(/college|fees|books|stationery|exam/)) {
-    return "college";
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+/*
+ * Allowed categories for SettleFlow.
+ *
+ * Keeping this controlled is important:
+ * the model can suggest a category,
+ * but it cannot invent arbitrary categories.
+ */
+const EXPENSE_CATEGORIES = [
+  "food",
+  "travel",
+  "rent",
+  "utilities",
+  "shopping",
+  "entertainment",
+  "college",
+  "other",
+];
+
+/*
+ * Structured schema returned by the model.
+ *
+ * The model MUST return this shape.
+ */
+const ExpenseItem = z.object({
+  payerName: z
+    .string()
+    .describe("Name of the person who paid for this expense."),
+  amount: z
+    .number()
+    .positive()
+    .describe("Total amount paid for the expense."),
+  description: z
+    .string()
+    .min(1)
+    .describe("Short description of the expense."),
+  category: z
+    .enum(EXPENSE_CATEGORIES)
+    .describe("One of the allowed SettleFlow expense categories."),
+});
+
+const ExpenseParseResponse = z.object({
+  expenses: z.array(ExpenseItem),
+});
+
+function getClient() {
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error("OPENAI_API_KEY is missing");
   }
 
-  return "other";
+  return client;
 }
 
-// 2) Parse natural-language text into expenses using regex
-// Example text:
-// "I paid 1200 for hotel, Rohit paid 600 for dinner, Aman paid 300 for snacks"
-export async function parseNaturalLanguageExpenses(text = "") {
-  const out = [];
-  const pattern = /(\w+)\s+paid\s+(\d+(?:\.\d+)?)\s+(?:for\s+)?([^.,]+)/gi;
-  let match;
-  while ((match = pattern.exec(text)) !== null) {
-    const payerName = match[1];
-    const amount = parseFloat(match[2]);
-    const description = match[3].trim();
-    if (!isNaN(amount)) {
-      out.push({ payerName, amount, description });
-    }
-  }
-  return out;
-}
-
-// 3) Generate a simple insights summary text from stats
-export async function generateInsightsSummary(stats) {
-  const lines = [];
-  const total = stats.total || 0;
-  const count = stats.count || 0;
-  const byCategory = stats.byCategory || {};
-
-  lines.push(`Total spent this month: ₹${total.toFixed(2)} across ${count} expenses.`);
-
-  const entries = Object.entries(byCategory);
-  if (entries.length) {
-    entries.sort((a, b) => b[1] - a[1]);
-    const [topCat, topVal] = entries[0];
-    lines.push(`Highest spending category: ${topCat} (₹${topVal.toFixed(2)}).`);
-
-    if (entries.length > 1) {
-      const [secondCat, secondVal] = entries[1];
-      lines.push(
-        `Second highest category: ${secondCat} (₹${secondVal.toFixed(2)}).`
-      );
-    }
-  } else {
-    lines.push("No category breakdown available yet. Add more detailed descriptions.");
+/**
+ * Parse natural language into structured expenses.
+ *
+ * Example:
+ *
+ * "Yesterday I paid 1200 for the hotel and Rahul paid
+ *  600 for dinner."
+ *
+ * -> structured expense objects
+ */
+export async function parseNaturalLanguageExpenses({
+  text,
+  members,
+  currentUserName,
+}) {
+  if (!text || !text.trim()) {
+    throw new Error("Expense text is required");
   }
 
-  if (total > 0) {
-    lines.push(
-      "Try setting a simple budget target for your top category and track it weekly."
+  if (!Array.isArray(members) || members.length === 0) {
+    throw new Error("Group members are required");
+  }
+
+  const memberNames = members.map((member) => member.name);
+
+  const systemPrompt = `
+You are the expense extraction engine for SettleFlow.
+
+Your job is to convert casual human expense descriptions into structured expense records.
+
+IMPORTANT RULES:
+
+1. Only identify people who exist in the supplied group member list.
+2. If the user says "I", interpret it as the current user's name.
+3. Never invent a payer.
+4. Extract every distinct expense you can identify.
+5. Amount must be a positive number.
+6. Description should be short and human-readable.
+7. Category MUST be one of:
+   food, travel, rent, utilities, shopping, entertainment, college, other
+8. If the category is ambiguous, use "other".
+9. Do not calculate individual splits. SettleFlow will do that separately.
+10. Do not add commentary outside the structured response.
+11. If a sentence does not clearly identify an expense, ignore it.
+
+Current user:
+${currentUserName}
+
+Group members:
+${memberNames.join(", ")}
+`;
+
+  const input = `
+Extract expenses from the following user input:
+
+${text}
+`;
+
+  const response = await getClient().responses.parse({
+    model: "gpt-5.6-luna",
+    instructions: systemPrompt,
+    input,
+    text: {
+      format: zodTextFormat(
+        ExpenseParseResponse,
+        "settleflow_expenses"
+      ),
+    },
+  });
+
+  if (response.status !== "completed") {
+    throw new Error(
+      `AI response incomplete: ${JSON.stringify(
+        response.incomplete_details || {}
+      )}`
     );
   }
 
-  return lines.join(" ");
-}
+  const parsed = response.output_parsed;
 
-// 4) Explain settlements in plain language
-export async function explainSettlements(transfers, usersMap) {
-  if (!transfers || !transfers.length) {
-    return "No settlements needed. Everyone is already balanced.";
+  if (!parsed) {
+    throw new Error("AI returned no structured expense data");
   }
 
-  const lines = [];
-  lines.push(
-    "These transfers settle all balances with a minimal number of payments between group members:"
-  );
+  /*
+   * SECOND validation layer:
+   * Even though OpenAI structured output validates the schema,
+   * we still validate against YOUR application's business rules.
+   */
 
-  transfers.forEach((t) => {
-    const fromName = usersMap[t.from] || "Someone";
-    const toName = usersMap[t.to] || "Someone";
-    lines.push(`${fromName} pays ${toName} ₹${t.amount.toFixed(2)}.`);
+  const normalizedMembers = members.map((member) => ({
+    id: member._id.toString(),
+    name: member.name,
+  }));
+
+  const validExpenses = [];
+
+  for (const expense of parsed.expenses) {
+    const matchedMember = normalizedMembers.find(
+      (member) =>
+        member.name.toLowerCase() ===
+        expense.payerName.trim().toLowerCase()
+    );
+
+    if (!matchedMember) {
+      continue;
+    }
+
+    if (!Number.isFinite(expense.amount) || expense.amount <= 0) {
+      continue;
+    }
+
+    validExpenses.push({
+      payerName: matchedMember.name,
+      amount: Number(expense.amount.toFixed(2)),
+      description: expense.description.trim(),
+      category: expense.category,
+    });
+  }
+
+  return validExpenses;
+}
+
+/**
+ * AI-generated settlement explanation.
+ *
+ * This is still structured through the same client,
+ * but unlike the parser it only returns text.
+ */
+export async function explainSettlements(transfers, usersMap) {
+  if (!transfers || transfers.length === 0) {
+    return "No settlements are required. Everyone is already balanced.";
+  }
+
+  const prompt = `
+Explain this SettleFlow settlement plan clearly and briefly.
+
+Users:
+${JSON.stringify(usersMap, null, 2)}
+
+Transfers:
+${JSON.stringify(transfers, null, 2)}
+
+Explain:
+1. who pays whom,
+2. why these transfers settle the balances,
+3. why the number of transfers is compact.
+
+Use plain English.
+Do not invent any additional transactions.
+`;
+
+  const response = await getClient().responses.create({
+    model: "gpt-5.6-luna",
+    instructions:
+      "You explain financial settlement results clearly. Never invent transactions.",
+    input: prompt,
   });
 
-  lines.push(
-    "This pattern minimizes the number of transactions by directly matching people who owe money with those who should receive it."
-  );
+  return response.output_text.trim();
+}
 
-  return lines.join("\n");
+/**
+ * AI monthly insight summary.
+ */
+export async function generateInsightsSummary(stats) {
+  const prompt = `
+Analyze these SettleFlow expense statistics:
+
+${JSON.stringify(stats, null, 2)}
+
+Provide:
+- the highest spending category,
+- notable spending patterns,
+- 1-2 practical observations.
+
+Keep it concise and factual.
+Do not invent numbers.
+`;
+
+  const response = await getClient().responses.create({
+    model: "gpt-5.6-luna",
+    instructions:
+      "You are a concise financial expense analysis assistant. Only use supplied data.",
+    input: prompt,
+  });
+
+  return response.output_text.trim();
+}
+
+/**
+ * Kept for compatibility with existing expense creation code.
+ *
+ * It now uses the same structured AI classification instead
+ * of keyword matching.
+ */
+export async function categorizeExpense(description) {
+  if (!description?.trim()) {
+    return "other";
+  }
+
+  const CategoryResponse = z.object({
+    category: z
+      .enum(EXPENSE_CATEGORIES)
+      .describe("Expense category."),
+  });
+
+  const response = await getClient().responses.parse({
+    model: "gpt-5.6-luna",
+    instructions: `
+Classify the expense into exactly one of:
+food, travel, rent, utilities, shopping, entertainment, college, other.
+
+Return "other" when uncertain.
+`,
+    input: description,
+    text: {
+      format: zodTextFormat(
+        CategoryResponse,
+        "expense_category"
+      ),
+    },
+  });
+
+  if (!response.output_parsed) {
+    return "other";
+  }
+
+  return response.output_parsed.category;
 }
