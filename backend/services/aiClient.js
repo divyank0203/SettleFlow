@@ -443,6 +443,7 @@ Explain:
 - why the transfer count is compact.
 
 Keep the explanation concise.
+Use INR, not any other currency.
 `,
           },
           {
