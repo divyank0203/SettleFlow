@@ -5,8 +5,9 @@ export default function Insights() {
   const [groups, setGroups] = useState([]);
   const [groupId, setGroupId] = useState("");
   const [stats, setStats] = useState(null);
-  const [summary, setSummary] = useState("");
-  const [loading, setLoading] = useState(false);
+const [summary, setSummary] = useState("");
+const [loading, setLoading] = useState(false);
+const [type, setType] = useState("monthly");
 
   useEffect(() => {
     async function load() {
@@ -24,7 +25,12 @@ export default function Insights() {
     if (!groupId) return;
     setLoading(true);
     try {
-      const data = await api(`/api/ai/monthly-insights/${groupId}`);
+      const endpoint =
+  type === "monthly"
+    ? `/api/ai/monthly-insights/${groupId}`
+    : `/api/ai/group-insights/${groupId}`;
+
+const data = await api(endpoint);
       setStats(data.stats);
       setSummary(data.summary);
     } catch (err) {
@@ -36,12 +42,31 @@ export default function Insights() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-xl font-semibold text-slate-800 dark:text-slate-100">
-        Monthly Insights
-      </h2>
+<h2 className="text-xl font-semibold text-slate-800 dark:text-slate-100">
+  {type === "monthly"
+    ? "Monthly Insights"
+    : "Group Insights"}
+</h2>
 
       <div className="bg-white dark:bg-slate-900 rounded-xl shadow-sm border border-slate-200 dark:border-slate-800 p-4 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+  <select
+  value={type}
+  onChange={(e) => {
+    setType(e.target.value);
+    setStats(null);
+    setSummary("");
+  }}
+  className="rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm text-slate-900 dark:text-slate-100"
+>
+  <option value="monthly">
+    This Month
+  </option>
+
+  <option value="group">
+    Entire Group
+  </option>
+</select>
           <select
             value={groupId}
             onChange={(e) => setGroupId(e.target.value)}
