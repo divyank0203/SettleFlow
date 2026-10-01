@@ -510,7 +510,7 @@ Mention:
 - one notable pattern,
 - one practical observation.
 
-Never invent numbers.
+Never invent numbers and keep it all in INR(rupees)
 `,
           },
           {
