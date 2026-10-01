@@ -123,13 +123,17 @@ router.get(
         });
       }
 
-      const now = new Date();
+const now = new Date();
 
-      const startOfMonth = new Date(
-        now.getFullYear(),
-        now.getMonth(),
-        1
-      );
+const startOfMonth = new Date(
+  now.getFullYear(),
+  now.getMonth(),
+  1,
+  0,
+  0,
+  0,
+  0
+);
 
       const expenses = await Expense.find({
         groupId,
@@ -160,18 +164,116 @@ router.get(
         stats.total.toFixed(2)
       );
 
-      const summary =
-        await generateInsightsSummary(stats);
+let summary;
+
+try {
+  summary = await generateInsightsSummary(stats);
+} catch (error) {
+  console.error("Groq insights failed:", error);
+
+  summary =
+    "AI summary is currently unavailable. " +
+    "Your expense statistics are still shown below.";
+}
+
+return res.json({
+  stats,
+  summary,
+});
+    } catch (error) {
+      console.error("Groq insights error:", error);
+
+      return res.status(500).json({
+        message: "AI insights failed",
+      });
+    }
+  }
+);
+
+/*
+ * GET /api/ai/group-insights/:groupId
+ */
+router.get(
+  "/group-insights/:groupId",
+  auth,
+  async (req, res) => {
+    try {
+      const { groupId } = req.params;
+
+      const group = await Group.findById(groupId)
+        .select("members name");
+
+      if (!group) {
+        return res.status(404).json({
+          message: "Group not found",
+        });
+      }
+
+      const isMember = group.members.some(
+        (memberId) =>
+          memberId.toString() === req.user.id
+      );
+
+      if (!isMember) {
+        return res.status(403).json({
+          message: "Not allowed",
+        });
+      }
+
+      const expenses = await Expense.find({
+        groupId,
+      })
+        .sort({ createdAt: -1 })
+        .lean();
+
+      const stats = {
+        total: 0,
+        count: expenses.length,
+        byCategory: {},
+      };
+
+      for (const expense of expenses) {
+        stats.total += expense.amount;
+
+        const category =
+          expense.category || "other";
+
+        stats.byCategory[category] =
+          (stats.byCategory[category] || 0) +
+          expense.amount;
+      }
+
+      stats.total = Number(
+        stats.total.toFixed(2)
+      );
+
+      let summary;
+
+      try {
+        summary =
+          await generateInsightsSummary(stats);
+      } catch (error) {
+        console.error(
+          "Group Groq insights failed:",
+          error
+        );
+
+        summary =
+          "AI summary is currently unavailable.";
+      }
 
       return res.json({
         stats,
         summary,
       });
     } catch (error) {
-      console.error("Groq insights error:", error);
+      console.error(
+        "Group insights error:",
+        error
+      );
 
       return res.status(500).json({
-        message: "AI insights failed",
+        message: "Group insights failed",
       });
     }
   }
