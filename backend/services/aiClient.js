@@ -531,14 +531,9 @@ Never invent numbers.
         ?.content?.trim() ||
       "Unable to generate insights."
     );
-  } catch (error) {
-    console.error(
-      "Groq insights error:",
-      error
-    );
+} catch (error) {
+  console.error("Groq insights error:", error);
 
-    throw new Error(
-      "Insights generation failed"
-    );
-  }
+  return "AI summary is currently unavailable.";
+}
 }
